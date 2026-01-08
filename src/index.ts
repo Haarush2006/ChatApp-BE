@@ -7,6 +7,7 @@ import { Client } from "./types/client";
 const rooms = new Map<number, Set<Client>>();
 
 const wss = new WebSocketServer({port: 8080})
+let lastMessageAt = 0
 
 
 wss.on("connection",(socket)=>{
@@ -30,14 +31,26 @@ wss.on("connection",(socket)=>{
             if (!rooms.has(roomId)) {
                 rooms.set(roomId, new Set());
             }
+            const room = rooms.get(roomId)!;
+            for (const client of room) {
+                if (client.username === parsed.username) {
+                    socket.send(JSON.stringify({
+                        type: "error",
+                        message: "Username already taken"
+                    }));
+                    return;
+                }
+            }
 
             currentClient = {
                 username: parsed.username,
                 socket,
                 roomId
             }
+
             rooms.get(roomId)!.add(currentClient);
             broadcast(currentClient.roomId,{
+                type:"system",
                 senderName: currentClient.username,
                 message: `User ${currentClient.username} joined`})
 
@@ -53,9 +66,13 @@ wss.on("connection",(socket)=>{
                 );
                 return;
             }
+             const now = Date.now();
+            if (now - lastMessageAt < 300) return; 
+            lastMessageAt = now;
 
             const userRoom = currentClient.roomId
             broadcast(userRoom, {
+                type:"chat",
                 senderName: currentClient.username,
                 message: parsed.message,
             });
@@ -75,6 +92,7 @@ wss.on("connection",(socket)=>{
         }
 
         broadcast(currentClient.roomId, {
+            type:"system",
             senderName:currentClient.username,
             message: `User ${currentClient.username} left`,
         });
@@ -85,15 +103,42 @@ wss.on("connection",(socket)=>{
 
 
 
-function broadcast(roomId: number, payload:{
-    senderName: string
-    message:string}) {
+// function broadcast(roomId: number, payload:{
+//     senderName: string
+//     message:string}) {
+//   const room = rooms.get(roomId);
+//   if (!room) return;
+
+//   const message = payload.message;
+
+//   room.forEach((client) => {
+//     client.socket.send(message);
+//   });
+// }
+
+
+
+function broadcast(
+  roomId: number,
+  payload: {
+    type?:string,
+    senderName: string;
+    message: string;
+  }
+) {
   const room = rooms.get(roomId);
   if (!room) return;
 
-  const message = payload.message;
+  const data = JSON.stringify({
+    type: payload.type,
+    sender: payload.senderName,
+    message: payload.message,
+    timestamp: Date.now(),
+  });
 
   room.forEach((client) => {
-    client.socket.send(message);
+    if (client.socket.readyState === WebSocket.OPEN) {
+      client.socket.send(data);
+    }
   });
 }
