@@ -37,6 +37,9 @@ wss.on("connection",(socket)=>{
                 roomId
             }
             rooms.get(roomId)!.add(currentClient);
+            broadcast(currentClient.roomId,{
+                senderName: currentClient.username,
+                message: `User ${currentClient.username} joined`})
 
 
         }
@@ -72,7 +75,7 @@ wss.on("connection",(socket)=>{
         }
 
         broadcast(currentClient.roomId, {
-            type: "system",
+            senderName:currentClient.username,
             message: `User ${currentClient.username} left`,
         });
   });
@@ -82,7 +85,9 @@ wss.on("connection",(socket)=>{
 
 
 
-function broadcast(roomId: number, payload:any) {
+function broadcast(roomId: number, payload:{
+    senderName: string
+    message:string}) {
   const room = rooms.get(roomId);
   if (!room) return;
 
