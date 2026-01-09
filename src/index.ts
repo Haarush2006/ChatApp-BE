@@ -1,144 +1,133 @@
-import { WebSocketServer, WebSocket } from "ws";
-import { IncomingMessage } from "./types/incmingmsg";
-import { Client } from "./types/client";
+import { WebSocketServer, WebSocket } from "ws"
 
+interface Client {
+  socket: WebSocket
+  username: string
+  roomId: string
+}
 
+interface Message {
+  type: "chat" | "system"
+  sender: string
+  message: string
+  timestamp: number
+}
 
-const rooms = new Map<number, Set<Client>>();
+interface RoomData {
+  messages: Message[]
+  expiresAt: number
+}
 
-const wss = new WebSocketServer({port: 8080})
-let lastMessageAt = 0
+const wss = new WebSocketServer({ port: 8080 })
 
+const rooms = new Map<string, Set<Client>>()
+const roomStore = new Map<string, RoomData>()
 
-wss.on("connection",(socket)=>{
-    
-    let currentClient: Client | null = null;
-    console.log("Connected to the WSS")
+const ROOM_TTL = 30 * 60 * 1000 
 
-    socket.on("message", (data) => {
-        let parsed: IncomingMessage;
+function getRoom(roomId: string): RoomData {
+  const now = Date.now()
+  const room = roomStore.get(roomId)
 
-        try {
-            parsed = JSON.parse(data .toString());
-        } catch {
-            socket.send(JSON.stringify({ type: "error", message: "Invalid JSON" }));
-            return;
-        }
+  if (!room || room.expiresAt < now) {
+    const freshRoom: RoomData = {
+      messages: [],
+      expiresAt: now + ROOM_TTL,
+    }
+    roomStore.set(roomId, freshRoom)
+    return freshRoom
+  }
 
-        if (parsed.type === "join") {
-            const roomId = parsed.roomId;
+  return room
+}
 
-            if (!rooms.has(roomId)) {
-                rooms.set(roomId, new Set());
-            }
-            const room = rooms.get(roomId)!;
-            for (const client of room) {
-                if (client.username === parsed.username) {
-                    socket.send(JSON.stringify({
-                        type: "error",
-                        message: "Username already taken"
-                    }));
-                    return;
-                }
-            }
+wss.on("connection", (socket) => {
+  let currentClient: Client | null = null
 
-            currentClient = {
-                username: parsed.username,
-                socket,
-                roomId
-            }
+  socket.on("message", (raw) => {
+    const data = JSON.parse(raw.toString())
 
-            rooms.get(roomId)!.add(currentClient);
-            broadcast(currentClient.roomId,{
-                type:"system",
-                senderName: currentClient.username,
-                message: `User ${currentClient.username} joined`})
+    if (data.type === "join") {
+      const { username, roomId } = data
+      currentClient = { socket, username, roomId }
 
+      if (!rooms.has(roomId)) {
+        rooms.set(roomId, new Set())
+      }
 
-        }
+      rooms.get(roomId)!.add(currentClient)
 
+      const room = getRoom(roomId)
 
+      socket.send(
+        JSON.stringify({
+          type: "history",
+          messages: room.messages,
+        })
+      )
 
-        if(parsed.type == "chat"){
-            if (!currentClient) {
-                socket.send(
-                    JSON.stringify({ type: "error", message: "Join a room first" })
-                );
-                return;
-            }
-             const now = Date.now();
-            if (now - lastMessageAt < 300) return; 
-            lastMessageAt = now;
+      broadcast(roomId, {
+        type: "system",
+        sender: "system",
+        message: `${username} joined the room`,
+        timestamp: Date.now(),
+      })
 
-            const userRoom = currentClient.roomId
-            broadcast(userRoom, {
-                type:"chat",
-                senderName: currentClient.username,
-                message: parsed.message,
-            });
+      return
+    }
 
+    if (data.type === "chat" && currentClient) {
+      const room = getRoom(currentClient.roomId)
 
-        }
+      const msg: Message = {
+        type: "chat",
+        sender: currentClient.username,
+        message: data.message,
+        timestamp: Date.now(),
+      }
 
-    }),
-    socket.on("close", () => {
-        if (!currentClient) return;
+      room.messages.push(msg)
+      room.expiresAt = Date.now() + ROOM_TTL
 
-        const room = rooms.get(currentClient.roomId);
-        room?.delete(currentClient);
+      broadcast(currentClient.roomId, msg)
+    }
+  })
 
-        if (room && room.size === 0) {
-            rooms.delete(currentClient.roomId);
-        }
+  socket.on("close", () => {
+    if (!currentClient) return
 
-        broadcast(currentClient.roomId, {
-            type:"system",
-            senderName:currentClient.username,
-            message: `User ${currentClient.username} left`,
-        });
-  });
+    const { roomId, username } = currentClient
+    rooms.get(roomId)?.delete(currentClient)
 
+    broadcast(roomId, {
+      type: "system",
+      sender: "system",
+      message: `${username} left the room`,
+      timestamp: Date.now(),
+    })
+  })
 })
 
+setInterval(() => {
+  const now = Date.now()
 
-
-
-// function broadcast(roomId: number, payload:{
-//     senderName: string
-//     message:string}) {
-//   const room = rooms.get(roomId);
-//   if (!room) return;
-
-//   const message = payload.message;
-
-//   room.forEach((client) => {
-//     client.socket.send(message);
-//   });
-// }
-
-
-
-function broadcast(
-  roomId: number,
-  payload: {
-    type?:string,
-    senderName: string;
-    message: string;
-  }
-) {
-  const room = rooms.get(roomId);
-  if (!room) return;
-
-  const data = JSON.stringify({
-    type: payload.type,
-    sender: payload.senderName,
-    message: payload.message,
-    timestamp: Date.now(),
-  });
-
-  room.forEach((client) => {
-    if (client.socket.readyState === WebSocket.OPEN) {
-      client.socket.send(data);
+  for (const [roomId, room] of roomStore.entries()) {
+    if (room.expiresAt < now) {
+      roomStore.delete(roomId)
+      rooms.delete(roomId)
+      console.log(`Room ${roomId} expired and deleted`)
     }
-  });
+  }
+}, 60 * 1000) 
+
+function broadcast(roomId: string, payload: Message) {
+  const clients = rooms.get(roomId)
+  if (!clients) return
+
+  for (const client of clients) {
+    if (client.socket.readyState === WebSocket.OPEN) {
+      client.socket.send(JSON.stringify(payload))
+    }
+  }
 }
+console.log("WebSocket server running on port 8080")
