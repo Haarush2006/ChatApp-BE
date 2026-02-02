@@ -18,7 +18,8 @@ interface RoomData {
   expiresAt: number
 }
 
-const wss = new WebSocketServer({ port: 8080 })
+const PORT = parseInt(process.env.PORT || "8080", 10)
+const wss = new WebSocketServer({ port: PORT })
 
 const rooms = new Map<string, Set<Client>>()
 const roomStore = new Map<string, RoomData>()
@@ -130,4 +131,4 @@ function broadcast(roomId: string, payload: Message) {
     }
   }
 }
-console.log("WebSocket server running on port 8080")
+console.log(`WebSocket server running on port ${PORT}`)
